@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VideoDown - Descarga Videos Gratis</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Poppins', sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: #fff;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            flex: 1;
+        }
+
+        header {
+            text-align: center;
+            padding: 40px 20px;
+            background: linear-gradient(90deg, #1d4ed8 0%, #3b82f6 100%);
+            border-radius: 0 0 30px 30px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            margin-bottom: 40px;
+        }
+
+        .logo {
+            font-size: 3rem;
+            margin-bottom: 20px;
+            display: inline-block;
+        }
+
+        h1 {
+            font-size: 2.8rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #fff 0%, #dbeafe 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle {
+            font-size: 1.2rem;
+            font-weight: 300;
+            opacity: 0.9;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        main {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 40px 20px;
+        }
+
+        .bot-info {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 40px;
+            width: 100%;
+            max-width: 800px;
+            text-align: center;
+            margin-bottom: 40px;
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.2);
+        }
+
+        .bot-info h2 {
+            font-size: 2.2rem;
+            margin-bottom: 20px;
+            color: #60a5fa;
+            font-weight: 600;
+        }
+
+        .bot-info p {
+            font-size: 1.1rem;
+            margin-bottom: 30px;
+            color: #cbd5e1;
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 25px;
+            margin-bottom: 50px;
+            width: 100%;
+            max-width: 1000px;
+        }
+
+        .feature-card {
+            background: rgba(30, 41, 59, 0.7);
+            border-radius: 15px;
+            padding: 30px;
+            text-align: center;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            border: 1px solid rgba(59, 130, 246, 0.1);
+        }
+
+        .feature-card:hover {
+            transform: translateY(-10px);
+            box-shadow: 0 15px 30px rgba(0, 0, 0, 0.3);
+            border-color: rgba(59, 130, 246, 0.3);
+        }
+
+        .feature-icon {
+            font-size: 2.5rem;
+            color: #3b82f6;
+            margin-bottom: 20px;
+        }
+
+        .feature-card h3 {
+            font-size: 1.4rem;
+            margin-bottom: 15px;
+            color: #fff;
+        }
+
+        .feature-card p {
+            color: #94a3b8;
+            font-size: 0.95rem;
+        }
+
+        .cta-section {
+            text-align: center;
+            margin-top: 30px;
+            padding: 30px;
+            background: linear-gradient(90deg, rgba(29, 78, 216, 0.1) 0%, rgba(59, 130, 246, 0.1) 100%);
+            border-radius: 20px;
+            width: 100%;
+            max-width: 800px;
+        }
+
+        .cta-section h2 {
+            font-size: 2rem;
+            margin-bottom: 20px;
+            color: #60a5fa;
+        }
+
+        .telegram-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(90deg, #0088cc 0%, #24a1de 100%);
+            color: white;
+            font-size: 1.3rem;
+            font-weight: 600;
+            padding: 18px 40px;
+            border-radius: 50px;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            box-shadow: 0 10px 25px rgba(0, 136, 204, 0.4);
+            margin-top: 20px;
+            border: none;
+            cursor: pointer;
+        }
+
+        .telegram-btn:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 35px rgba(0, 136, 204, 0.6);
+            background: linear-gradient(90deg, #0077b5 0%, #1d9bf0 100%);
+        }
+
+        .telegram-btn i {
+            font-size: 1.8rem;
+            margin-right: 15px;
+        }
+
+        .instructions {
+            margin-top: 50px;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 20px;
+            padding: 40px;
+            width: 100%;
+            max-width: 800px;
+        }
+
+        .instructions h2 {
+            font-size: 2rem;
+            margin-bottom: 30px;
+            color: #60a5fa;
+            text-align: center;
+        }
+
+        .steps {
+            display: flex;
+            flex-direction: column;
+            gap: 30px;
+        }
+
+        .step {
+            display: flex;
+            align-items: flex-start;
+            gap: 20px;
+            padding: 20px;
+            background: rgba(30, 41, 59, 0.5);
+            border-radius: 15px;
+            transition: background 0.3s ease;
+        }
+
+        .step:hover {
+            background: rgba(30, 41, 59, 0.8);
+        }
+
+        .step-number {
+            background: #3b82f6;
+            color: white;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+
+        .step-content h3 {
+            font-size: 1.3rem;
+            margin-bottom: 10px;
+            color: #fff;
+        }
+
+        .step-content p {
+            color: #cbd5e1;
+        }
+
+        footer {
+            text-align: center;
+            padding: 30px 20px;
+            margin-top: 60px;
+            background: rgba(0, 0, 0, 0.3);
+            border-top: 1px solid rgba(59, 130, 246, 0.2);
+        }
+
+        .footer-content {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .disclaimer {
+            font-size: 0.9rem;
+            color: #94a3b8;
+            margin-top: 20px;
+            line-height: 1.5;
+        }
+
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 2.2rem;
+            }
+            
+            .subtitle {
+                font-size: 1rem;
+            }
+            
+            .bot-info, .cta-section, .instructions {
+                padding: 25px;
+            }
+            
+            .features {
+                grid-template-columns: 1fr;
+            }
+            
+            .telegram-btn {
+                font-size: 1.1rem;
+                padding: 15px 30px;
+            }
+            
+            .step {
+                flex-direction: column;
+                text-align: center;
+                align-items: center;
+            }
+        }
+
+        @media (max-width: 480px) {
+            h1 {
+                font-size: 1.8rem;
+            }
+            
+            .logo {
+                font-size: 2.5rem;
+            }
+            
+            .bot-info h2, .cta-section h2, .instructions h2 {
+                font-size: 1.6rem;
+            }
+            
+            .feature-card {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">
+                <i class="fas fa-video"></i>
+            </div>
+            <h1>VideoDown</h1>
+            <p class="subtitle">Descarga videos y audio de tus plataformas favoritas de forma rápida y sencilla. Totalmente gratis.</p>
+        </header>
+
+        <main>
+            <div class="bot-info">
+                <h2>Bot de Descarga de Videos</h2>
+                <p>Con nuestro bot de Telegram puedes descargar videos y audio de YouTube, TikTok, Instagram, Facebook y muchas más plataformas directamente en tu dispositivo. Fácil, rápido y sin anuncios.</p>
+                
+                <a href="https://t.me/allvdownbot" class="telegram-btn" target="_blank" rel="noopener">
+                    <i class="fab fa-telegram"></i>
+                    Iniciar Bot en Telegram
+                </a>
+            </div>
+
+            <div class="features">
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-film"></i>
+                    </div>
+                    <h3>Multiplataforma</h3>
+                    <p>Compatibilidad con YouTube, TikTok, Instagram, Twitter/X, Facebook y muchas otras plataformas.</p>
+                </div>
+                
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-music"></i>
+                    </div>
+                    <h3>Audio y Video</h3>
+                    <p>Descarga videos completos o extrae solo el audio en formato MP3 de alta calidad.</p>
+                </div>
+                
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-sliders-h"></i>
+                    </div>
+                    <h3>Múltiples Calidades</h3>
+                    <p>Selecciona entre diferentes resoluciones y tamaños según tus necesidades.</p>
+                </div>
+                
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-bolt"></i>
+                    </div>
+                    <h3>Rápido y Fácil</h3>
+                    <p>Interfaz intuitiva con botones interactivos. Solo envía el enlace y descarga.</p>
+                </div>
+            </div>
+
+            <div class="cta-section">
+                <h2>¡Comienza a Descargar Ahora!</h2>
+                <p>Haz clic en el botón para abrir nuestro bot en Telegram y comienza a descargar tus videos favoritos.</p>
+                
+                <a href="https://t.me/allvdownbot" class="telegram-btn" target="_blank" rel="noopener">
+                    <i class="fab fa-telegram"></i>
+                    Abrir VideoDown Bot
+                </a>
+            </div>
+
+            <div class="instructions">
+                <h2>¿Cómo Funciona?</h2>
+                <div class="steps">
+                    <div class="step">
+                        <div class="step-number">1</div>
+                        <div class="step-content">
+                            <h3>Abre el Bot en Telegram</h3>
+                            <p>Haz clic en el botón "Iniciar Bot" arriba o busca @allvdownbot en Telegram.</p>
+                        </div>
+                    </div>
+                    
+                    <div class="step">
+                        <div class="step-number">2</div>
+                        <div class="step-content">
+                            <h3>Envía el Enlace</h3>
+                            <p>Copia y envía el enlace del video que quieres descargar al bot.</p>
+                        </div>
+                    </div>
+                    
+                    <div class="step">
+                        <div class="step-number">3</div>
+                        <div class="step-content">
+                            <h3>Selecciona el Formato</h3>
+                            <p>Elige si quieres descargar el video completo o solo el audio en MP3.</p>
+                        </div>
+                    </div>
+                    
+                    <div class="step">
+                        <div class="step-number">4</div>
+                        <div class="step-content">
+                            <h3>¡Descarga y Disfruta!</h3>
+                            <p>Selecciona la calidad y el bot te enviará el archivo directamente al chat.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <div class="footer-content">
+                <a href="https://t.me/allvdownbot" class="telegram-btn" target="_blank" rel="noopener">
+                    <i class="fab fa-telegram"></i>
+                    @allvdownbot
+                </a>
+                <p class="disclaimer">
+                    VideoDown es una herramienta gratuita para uso personal. Respetamos los derechos de autor y te recomendamos descargar solo contenido que tengas permiso para usar o sea de dominio público. No almacenamos ningún video en nuestros servidores.
+                </p>
+            </div>
+        </footer>
+    </div>
+
+    <script>
+        // Efecto suave al hacer scroll
+        document.addEventListener('DOMContentLoaded', function() {
+            // Animación para los elementos al hacer scroll
+            const observerOptions = {
+                threshold: 0.1,
+                rootMargin: '0px 0px -50px 0px'
+            };
+            
+            const observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        entry.target.style.opacity = '1';
+                        entry.target.style.transform = 'translateY(0)';
+                    }
+                });
+            }, observerOptions);
+            
+            // Aplicar animación a las tarjetas de características
+            const featureCards = document.querySelectorAll('.feature-card');
+            featureCards.forEach(card => {
+                card.style.opacity = '0';
+                card.style.transform = 'translateY(20px)';
+                card.style.transition = 'opacity 0.5s ease, transform 0.5s ease';
+                observer.observe(card);
+            });
+            
+            // Aplicar animación a los pasos
+            const steps = document.querySelectorAll('.step');
+            steps.forEach(step => {
+                step.style.opacity = '0';
+                step.style.transform = 'translateY(20px)';
+                step.style.transition = 'opacity 0.5s ease, transform 0.5s ease';
+                observer.observe(step);
+            });
+            
+            // Efecto de confeti al hacer clic en el botón
+            const telegramButtons = document.querySelectorAll('.telegram-btn');
+            telegramButtons.forEach(button => {
+                button.addEventListener('click', function() {
+                    // Animación simple de clic
+                    this.style.transform = 'scale(0.95)';
+                    setTimeout(() => {
+                        this.style.transform = '';
+                    }, 200);
+                    
+                    // Registrar clic (opcional, para analytics)
+                    console.log('Botón de Telegram clickeado');
+                });
+            });
+            
+            // Mostrar mensaje de bienvenida
+            setTimeout(() => {
+                console.log('🎬 VideoDown - Página cargada correctamente');
+            }, 1000);
+        });
+    </script>
+</body>
+</html>
