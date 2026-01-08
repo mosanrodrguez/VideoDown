@@ -10,7 +10,6 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 import yt_dlp
-from flask import Flask, request, jsonify, render_template_string
 
 # Configuración del logging
 logging.basicConfig(
@@ -22,13 +21,9 @@ logger = logging.getLogger(__name__)
 # Diccionario para almacenar temporalmente la información de formatos por usuario
 user_data = {}
 
-# Flask app
-app = Flask(__name__)
-
 class VideoDownloaderBot:
-    def __init__(self, token: str, webhook_url: str):
+    def __init__(self, token: str):
         self.token = token
-        self.webhook_url = webhook_url
         self.app = Application.builder().token(token).build()
         
         # Configurar manejadores
@@ -39,7 +34,7 @@ class VideoDownloaderBot:
         self.app.add_handler(CommandHandler("start", self.start_command))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         self.app.add_handler(CallbackQueryHandler(self.handle_callback_query))
-    
+        
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Maneja el comando /start"""
         welcome_message = (
@@ -293,8 +288,8 @@ class VideoDownloaderBot:
             parse_mode=ParseMode.MARKDOWN
         )
         
-        # Descargar el video (ejecutar en un hilo separado para no bloquear)
-        success, file_path = await asyncio.to_thread(self.download_video, url, format_id, user_info['title'])
+        # Descargar el video
+        success, file_path = self.download_video(url, format_id, user_info['title'])
         
         if success:
             try:
@@ -343,8 +338,8 @@ class VideoDownloaderBot:
             parse_mode=ParseMode.MARKDOWN
         )
         
-        # Descargar el audio (ejecutar en un hilo separado para no bloquear)
-        success, file_path = await asyncio.to_thread(self.download_audio, url, format_id, user_info['title'])
+        # Descargar el audio
+        success, file_path = self.download_audio(url, format_id, user_info['title'])
         
         if success:
             try:
@@ -515,7 +510,7 @@ class VideoDownloaderBot:
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            'ffmpeg_location': '/usr/bin/ffmpeg',
+            'ffmpeg_location': '/data/data/com.termux/files/usr/bin/ffmpeg',
             'socket_timeout': 30,
             'retries': 3,
         }
@@ -543,110 +538,25 @@ class VideoDownloaderBot:
         # Patrón simple para URLs
         url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
         return re.match(url_pattern, text) is not None
+    
+    def run(self):
+        """Inicia el bot"""
+        print("🤖 Bot de descarga de videos iniciado...")
+        print("Presiona Ctrl+C para detenerlo")
+        
+        # CORRECCIÓN PRINCIPAL: Cambiar Update.ALL_UPDATES por None
+        self.app.run_polling(allowed_updates=None)
 
-# Inicialización global del bot
-telegram_bot = None
-
-# Rutas de Flask
-@app.route('/')
-def index():
-    """Página principal del servicio web"""
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>VideoDown Bot</title>
-        <style>
-            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-            .status { background: #4CAF50; color: white; padding: 20px; border-radius: 10px; margin: 20px auto; max-width: 600px; }
-            .info { background: #f0f0f0; padding: 20px; border-radius: 10px; margin: 20px auto; max-width: 600px; }
-        </style>
-    </head>
-    <body>
-        <h1>🤖 VideoDown Bot Service</h1>
-        <div class="status">
-            <h2>✅ Bot activo y funcionando</h2>
-            <p>El bot de Telegram está configurado con webhooks y listo para recibir mensajes.</p>
-        </div>
-        <div class="info">
-            <h3>📋 Información del servicio</h3>
-            <p><strong>Estado:</strong> En línea</p>
-            <p><strong>Tipo:</strong> Webhook</p>
-            <p><strong>URL del bot:</strong> <a href="https://t.me/allvdownbot">https://t.me/allvdownbot</a></p>
-            <p><strong>Endpoint webhook:</strong> /webhook</p>
-        </div>
-        <p>Este servicio mantiene activo el bot de descarga de videos VideoDown.</p>
-    </body>
-    </html>
-    """)
-
-@app.route('/webhook', methods=['POST'])
-async def webhook():
-    """Endpoint para recibir actualizaciones de Telegram"""
-    try:
-        if telegram_bot:
-            update = Update.de_json(request.get_json(force=True), telegram_bot.app.bot)
-            await telegram_bot.app.update_queue.put(update)
-        return jsonify({"status": "ok"}), 200
-    except Exception as e:
-        logger.error(f"Error en webhook: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route('/health')
-def health():
-    """Endpoint para comprobaciones de salud"""
-    return jsonify({"status": "healthy", "service": "videodown-bot"}), 200
-
-async def setup_bot():
-    """Configura el bot de Telegram"""
-    global telegram_bot
-    
-    # Obtener variables de entorno
-    token = os.environ.get('TELEGRAM_BOT_TOKEN')
-    webhook_url = os.environ.get('WEBHOOK_URL')
-    
-    if not token:
-        logger.error("Falta la variable de entorno TELEGRAM_BOT_TOKEN")
-        return
-    
-    if not webhook_url:
-        # Intentar obtener la URL del entorno de Render
-        render_service_url = os.environ.get('RENDER_EXTERNAL_URL')
-        if render_service_url:
-            webhook_url = render_service_url
-        else:
-            logger.error("Falta la variable de entorno WEBHOOK_URL")
-            return
-    
-    logger.info(f"Inicializando bot con token: {token[:10]}...")
-    logger.info(f"Webhook URL: {webhook_url}")
-    
-    # Crear el bot
-    telegram_bot = VideoDownloaderBot(token, webhook_url)
-    
-    # Configurar el webhook en Telegram
-    await telegram_bot.app.bot.set_webhook(
-        url=f"{webhook_url}/webhook",
-        drop_pending_updates=True
-    )
-    
-    logger.info("Bot inicializado correctamente con webhooks")
-
-def run_flask():
-    """Ejecuta la aplicación Flask"""
-    port = int(os.environ.get('PORT', 10000))
-    # Usar Waitress en lugar de Flask dev server para producción
-    from waitress import serve
-    serve(app, host='0.0.0.0', port=port)
-
-async def main():
-    """Función principal asíncrona"""
-    # Configurar el bot
-    await setup_bot()
-    
-    # Iniciar Flask en el hilo principal
-    run_flask()
 
 if __name__ == '__main__':
-    # Ejecutar la función principal
-    asyncio.run(main())
+    # Reemplaza 'TU_TOKEN_AQUI' con el token de tu bot
+    TOKEN = "8260660352:AAFPSK2-GXqGoBm2b3K988B_dadPXHduc5M"
+    
+    # Verificar que ffmpeg esté instalado
+    if not os.path.exists('/data/data/com.termux/files/usr/bin/ffmpeg'):
+        print("⚠️ ADVERTENCIA: ffmpeg no está instalado.")
+        print("Instálalo con: pkg install ffmpeg")
+        print("El bot funcionará pero puede tener problemas con algunos formatos de audio.")
+    
+    bot = VideoDownloaderBot(TOKEN)
+    bot.run()
