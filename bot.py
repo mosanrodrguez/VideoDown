@@ -5,7 +5,6 @@ import re
 import tempfile
 import asyncio
 from typing import Dict, List, Tuple
-from threading import Thread
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
@@ -35,22 +34,11 @@ class VideoDownloaderBot:
         # Configurar manejadores
         self.setup_handlers()
         
-        # Configurar webhook
-        asyncio.run(self.setup_webhook())
-        
     def setup_handlers(self):
         """Configura todos los manejadores de comandos y mensajes"""
         self.app.add_handler(CommandHandler("start", self.start_command))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         self.app.add_handler(CallbackQueryHandler(self.handle_callback_query))
-        
-    async def setup_webhook(self):
-        """Configura el webhook en Telegram"""
-        await self.app.bot.set_webhook(
-            url=f"{self.webhook_url}/webhook",
-            drop_pending_updates=True
-        )
-        logger.info(f"Webhook configurado en: {self.webhook_url}/webhook")
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Maneja el comando /start"""
@@ -593,25 +581,24 @@ def index():
     """)
 
 @app.route('/webhook', methods=['POST'])
-def webhook():
+async def webhook():
     """Endpoint para recibir actualizaciones de Telegram"""
-    if telegram_bot:
-        update = Update.de_json(request.get_json(force=True), telegram_bot.app.bot)
-        telegram_bot.app.update_queue.put_nowait(update)
-    return jsonify({"status": "ok"}), 200
+    try:
+        if telegram_bot:
+            update = Update.de_json(request.get_json(force=True), telegram_bot.app.bot)
+            await telegram_bot.app.update_queue.put(update)
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        logger.error(f"Error en webhook: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/health')
 def health():
     """Endpoint para comprobaciones de salud"""
     return jsonify({"status": "healthy", "service": "videodown-bot"}), 200
 
-def run_flask():
-    """Ejecuta la aplicación Flask"""
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, debug=False)
-
-def init_bot():
-    """Inicializa el bot de Telegram"""
+async def setup_bot():
+    """Configura el bot de Telegram"""
     global telegram_bot
     
     # Obtener variables de entorno
@@ -637,21 +624,29 @@ def init_bot():
     # Crear el bot
     telegram_bot = VideoDownloaderBot(token, webhook_url)
     
-    # Iniciar el procesador de actualizaciones en un hilo separado
-    thread = Thread(target=run_bot)
-    thread.start()
+    # Configurar el webhook en Telegram
+    await telegram_bot.app.bot.set_webhook(
+        url=f"{webhook_url}/webhook",
+        drop_pending_updates=True
+    )
     
-    logger.info("Bot inicializado correctamente")
+    logger.info("Bot inicializado correctamente con webhooks")
 
-def run_bot():
-    """Ejecuta el bot en un hilo separado"""
-    if telegram_bot:
-        telegram_bot.app.run_polling(allowed_updates=None, close_loop=False)
+def run_flask():
+    """Ejecuta la aplicación Flask"""
+    port = int(os.environ.get('PORT', 10000))
+    # Usar Waitress en lugar de Flask dev server para producción
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=port)
+
+async def main():
+    """Función principal asíncrona"""
+    # Configurar el bot
+    await setup_bot()
+    
+    # Iniciar Flask en el hilo principal
+    run_flask()
 
 if __name__ == '__main__':
-    # Iniciar el bot en un hilo separado
-    init_thread = Thread(target=init_bot)
-    init_thread.start()
-    
-    # Ejecutar Flask en el hilo principal
-    run_flask()
+    # Ejecutar la función principal
+    asyncio.run(main())
