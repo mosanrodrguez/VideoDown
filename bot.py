@@ -1,562 +1,937 @@
-#!/usr/bin/env python3
-import logging
 import os
-import re
+import logging
+import json
 import tempfile
+import subprocess
 import asyncio
-from typing import Dict, List, Tuple
-
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from telegram.constants import ParseMode
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 import yt_dlp
 
-# Configuración del logging
+# Configuración
+TOKEN = "8260660352:AAFPSK2-GXqGoBm2b3K988B_dadPXHduc5M"
+DOWNLOAD_FOLDER = "downloads"
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB en bytes
+
+if not os.path.exists(DOWNLOAD_FOLDER):
+    os.makedirs(DOWNLOAD_FOLDER)
+
+# Configurar logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Diccionario para almacenar temporalmente la información de formatos por usuario
-user_data = {}
+# Cache para datos de usuario
+user_data_cache = {}
 
-class VideoDownloaderBot:
-    def __init__(self, token: str):
-        self.token = token
-        self.app = Application.builder().token(token).build()
-        
-        # Configurar manejadores
-        self.setup_handlers()
-        
-    def setup_handlers(self):
-        """Configura todos los manejadores de comandos y mensajes"""
-        self.app.add_handler(CommandHandler("start", self.start_command))
-        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
-        self.app.add_handler(CallbackQueryHandler(self.handle_callback_query))
-        
-    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Maneja el comando /start"""
-        welcome_message = (
-            "¡Bienvenid@ a VideoDown! 🎬\n\n"
-            "Envía el enlace del vídeo a descargar\n\n"
-            "📌 Formatos soportados:\n"
-            "• YouTube\n"
-            "• TikTok\n"
-            "• Instagram\n"
-            "• Twitter/X\n"
-            "• Facebook\n"
-            "• Y muchos más..."
+# User-Agents para rotación
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0'
+]
+
+# --- FUNCIONES AUXILIARES ---
+def format_size(bytes_size):
+    """Formatear tamaño en formato legible"""
+    if not bytes_size:
+        return "Desconocido"
+    
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if bytes_size < 1024.0 or unit == 'GB':
+            break
+        bytes_size /= 1024.0
+    
+    if unit == 'B':
+        return f"{int(bytes_size)}B"
+    else:
+        return f"{bytes_size:.2f}{unit}"
+
+def calculate_filesize(tbr, duration):
+    """Calcular tamaño aproximado usando bitrate y duración"""
+    if tbr and duration:
+        # tbr está en kbps, convertir a bytes/segundo
+        bytes_per_second = (tbr * 1000) / 8
+        return bytes_per_second * duration
+    return None
+
+def get_ffprobe_size(file_path):
+    """Obtener tamaño exacto con ffprobe"""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'quiet', '-show_entries', 'format=size', 
+             '-of', 'json', file_path],
+            capture_output=True,
+            text=True,
+            timeout=10
         )
-        
-        await update.message.reply_text(welcome_message)
-        
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Maneja los mensajes con enlaces de video"""
-        url = update.message.text.strip()
-        
-        # Verificar si es una URL válida
-        if not self.is_valid_url(url):
-            await update.message.reply_text("⚠️ Por favor, envía una URL válida.")
-            return
-        
-        # Informar que se está procesando
-        processing_msg = await update.message.reply_text("🔍 Analizando el video...")
-        
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            return int(data['format']['size'])
+    except Exception as e:
+        logger.warning(f"ffprobe error: {e}")
+    return None
+
+def parse_format_info(format_dict):
+    """Extraer información clara de un formato"""
+    format_id = format_dict.get('format_id', 'N/A')
+    resolution = f"{format_dict.get('width', '?')}x{format_dict.get('height', '?')}"
+    
+    # Obtener tamaño
+    filesize = format_dict.get('filesize') or format_dict.get('filesize_approx')
+    
+    # Si no hay tamaño, calcular con tbr
+    if not filesize and format_dict.get('tbr') and format_dict.get('duration'):
+        filesize = calculate_filesize(format_dict['tbr'], format_dict['duration'])
+    
+    size_str = format_size(filesize) if filesize else "Desconocido"
+    
+    # Códecs
+    vcodec = format_dict.get('vcodec', 'none')
+    acodec = format_dict.get('acodec', 'none')
+    
+    # Bitrate
+    tbr = format_dict.get('tbr', 0)
+    tbr_str = f"{tbr:.1f}kbps" if tbr else "N/A"
+    
+    # Nombre del formato
+    format_note = format_dict.get('format_note', '')
+    ext = format_dict.get('ext', 'N/A')
+    
+    # Tipo de formato
+    if vcodec != 'none' and acodec != 'none':
+        media_type = '🎬 Video+Audio'
+    elif vcodec != 'none':
+        media_type = '🎥 Solo Video'
+    else:
+        media_type = '🎵 Solo Audio'
+    
+    return {
+        'format_id': format_id,
+        'resolution': resolution,
+        'size_str': size_str,
+        'size_bytes': filesize,
+        'vcodec': vcodec,
+        'acodec': acodec,
+        'tbr_str': tbr_str,
+        'tbr': tbr,
+        'format_note': format_note,
+        'ext': ext,
+        'media_type': media_type
+    }
+
+async def get_formats_list(url, max_retries=3):
+    """Obtener lista de formatos con yt-dlp -F"""
+    for attempt in range(max_retries):
         try:
-            # Obtener información del video
-            video_info = self.get_video_info(url)
-            
-            if not video_info:
-                await processing_msg.edit_text("❌ No se pudo obtener información del video. Verifica el enlace.")
-                return
-            
-            # Guardar información del usuario
-            user_id = update.effective_user.id
-            user_data[user_id] = {
-                'url': url,
-                'title': video_info['title'],
-                'formats': video_info['formats'],
-                'audio_formats': video_info['audio_formats']
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': False,
+                'user_agent': USER_AGENTS[attempt % len(USER_AGENTS)],
+                'socket_timeout': 30,
+                'http_headers': {
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-us,en;q=0.5',
+                    'Accept-Encoding': 'gzip, deflate',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                }
             }
             
-            # Crear teclado para seleccionar tipo de descarga
-            keyboard = [
-                [
-                    InlineKeyboardButton("🎬 Video", callback_data='type_video'),
-                    InlineKeyboardButton("💽 Audio", callback_data='type_audio')
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await processing_msg.edit_text(
-                f"📹 **{video_info['title']}**\n\n"
-                f"📊 Duración: {video_info['duration']}\n"
-                f"👤 Canal: {video_info['uploader']}\n\n"
-                "¿Qué deseas descargar?",
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
-        except Exception as e:
-            logger.error(f"Error al procesar el video: {e}")
-            await processing_msg.edit_text("❌ Error al procesar el video. Intenta de nuevo.")
-    
-    async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Maneja las selecciones de los botones"""
-        query = update.callback_query
-        await query.answer()
-        
-        user_id = update.effective_user.id
-        
-        # Manejar selección de tipo (video/audio)
-        if query.data.startswith('type_'):
-            await self.handle_type_selection(query, user_id)
-            
-        # Manejar selección de formato específico
-        elif query.data.startswith('format_'):
-            await self.handle_format_selection(query, user_id)
-            
-        # Manejar selección de calidad de audio
-        elif query.data.startswith('audio_'):
-            await self.handle_audio_selection(query, user_id)
-            
-        # Manejar botón de volver
-        elif query.data == 'back_to_menu':
-            await self.handle_back_button(query, user_id)
-    
-    async def handle_type_selection(self, query, user_id):
-        """Maneja la selección de video o audio"""
-        download_type = query.data.split('_')[1]
-        
-        if user_id not in user_data:
-            await query.edit_message_text("❌ Sesión expirada. Por favor, envía el enlace nuevamente.")
-            return
-        
-        user_info = user_data[user_id]
-        
-        if download_type == 'video':
-            # Mostrar formatos de video disponibles
-            await self.show_video_formats(query, user_info)
-        else:
-            # Mostrar formatos de audio disponibles
-            await self.show_audio_formats(query, user_info)
-    
-    async def show_video_formats(self, query, user_info):
-        """Muestra los formatos de video disponibles"""
-        formats = user_info['formats']
-        
-        if not formats:
-            await query.edit_message_text("❌ No hay formatos de video disponibles.")
-            return
-        
-        # Crear botones para cada formato
-        keyboard = []
-        current_row = []
-        
-        for i, fmt in enumerate(formats[:8]):  # Limitar a 8 formatos
-            if fmt.get('filesize'):
-                size_mb = fmt['filesize'] / (1024 * 1024)
-                size_text = f"{size_mb:.1f}MB"
-            elif fmt.get('filesize_approx'):
-                size_mb = fmt['filesize_approx'] / (1024 * 1024)
-                size_text = f"~{size_mb:.1f}MB"
-            else:
-                size_text = "Tamaño desconocido"
-            
-            # Extraer solo la resolución si está disponible
-            resolution = fmt.get('resolution', 'Desconocido')
-            if 'x' in str(resolution):
-                try:
-                    height = resolution.split('x')[1]
-                    resolution = f"{height}p"
-                except:
-                    pass
-            
-            button_text = f"🎬 {resolution} - {size_text}"
-            callback_data = f"format_{fmt['format_id']}"
-            
-            current_row.append(InlineKeyboardButton(button_text, callback_data=callback_data))
-            
-            if len(current_row) == 2 or i == len(formats[:8]) - 1:
-                keyboard.append(current_row)
-                current_row = []
-        
-        # Agregar botón de volver
-        keyboard.append([InlineKeyboardButton("↩️ Volver", callback_data='back_to_menu')])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            f"🎬 **{user_info['title']}**\n\n"
-            "Selecciona la calidad del video:",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    async def show_audio_formats(self, query, user_info):
-        """Muestra los formatos de audio disponibles"""
-        audio_formats = user_info['audio_formats']
-        
-        if not audio_formats:
-            await query.edit_message_text("❌ No hay formatos de audio disponibles.")
-            return
-        
-        # Crear botones para cada formato de audio
-        keyboard = []
-        
-        for i, fmt in enumerate(audio_formats[:4]):  # Limitar a 4 formatos de audio
-            if fmt.get('filesize'):
-                size_mb = fmt['filesize'] / (1024 * 1024)
-                size_text = f"{size_mb:.1f}MB"
-            else:
-                size_text = "Tamaño desconocido"
-            
-            # Extraer información del códec de audio
-            abr = fmt.get('abr', 0)
-            
-            button_text = f"🎵 {abr}kbps - {size_text}"
-            callback_data = f"audio_{fmt['format_id']}"
-            
-            keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
-        
-        # Agregar botón de volver
-        keyboard.append([InlineKeyboardButton("↩️ Volver", callback_data='back_to_menu')])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            f"💽 **{user_info['title']}**\n\n"
-            "Selecciona la calidad del audio:",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    async def handle_back_button(self, query, user_id):
-        """Maneja el botón de volver al menú principal"""
-        if user_id not in user_data:
-            await query.edit_message_text("❌ Sesión expirada.")
-            return
-        
-        user_info = user_data[user_id]
-        
-        # Crear teclado para seleccionar tipo de descarga
-        keyboard = [
-            [
-                InlineKeyboardButton("🎬 Video", callback_data='type_video'),
-                InlineKeyboardButton("💽 Audio", callback_data='type_audio')
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            f"📹 **{user_info['title']}**\n\n"
-            "¿Qué deseas descargar?",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    async def handle_format_selection(self, query, user_id):
-        """Maneja la descarga del formato de video seleccionado"""
-        format_id = query.data.split('_')[1]
-        
-        if user_id not in user_data:
-            await query.edit_message_text("❌ Sesión expirada.")
-            return
-        
-        user_info = user_data[user_id]
-        url = user_info['url']
-        
-        # Encontrar el formato seleccionado
-        selected_format = None
-        for fmt in user_info['formats']:
-            if fmt['format_id'] == format_id:
-                selected_format = fmt
-                break
-        
-        if not selected_format:
-            await query.edit_message_text("❌ Formato no disponible.")
-            return
-        
-        # Mostrar mensaje de descarga
-        status_msg = await query.edit_message_text(
-            f"⬇️ **Descargando video...**\n\n"
-            f"📹 {user_info['title']}\n"
-            f"📊 Calidad: {selected_format.get('resolution', 'Desconocida')}\n"
-            f"⏳ Por favor, espera...\n\n"
-            f"🔄 Esto puede tardar unos minutos...",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        # Descargar el video
-        success, file_path = self.download_video(url, format_id, user_info['title'])
-        
-        if success:
-            try:
-                # Actualizar mensaje
-                await status_msg.edit_text("📤 Enviando video...")
-                
-                # Enviar el video
-                with open(file_path, 'rb') as video_file:
-                    await query.message.reply_video(
-                        video=video_file,
-                        caption=f"✅ **{user_info['title']}**\n\n"
-                               f"📊 Calidad: {selected_format.get('resolution', 'Desconocida')}",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                
-                # Eliminar archivo temporal
-                os.remove(file_path)
-                
-                # Limpiar datos del usuario
-                if user_id in user_data:
-                    del user_data[user_id]
-                    
-            except Exception as e:
-                logger.error(f"Error al enviar video: {e}")
-                await query.message.reply_text("❌ Error al enviar el video. El archivo puede ser muy grande.")
-        else:
-            await status_msg.edit_text("❌ Error al descargar el video. Intenta con otra calidad.")
-    
-    async def handle_audio_selection(self, query, user_id):
-        """Maneja la descarga del formato de audio seleccionado"""
-        format_id = query.data.split('_')[1]
-        
-        if user_id not in user_data:
-            await query.edit_message_text("❌ Sesión expirada.")
-            return
-        
-        user_info = user_data[user_id]
-        url = user_info['url']
-        
-        # Mostrar mensaje de descarga
-        status_msg = await query.edit_message_text(
-            f"⬇️ **Extrayendo audio...**\n\n"
-            f"🎵 {user_info['title']}\n"
-            f"⏳ Por favor, espera...\n\n"
-            f"🔄 Esto puede tardar unos minutos...",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        # Descargar el audio
-        success, file_path = self.download_audio(url, format_id, user_info['title'])
-        
-        if success:
-            try:
-                # Actualizar mensaje
-                await status_msg.edit_text("📤 Enviando audio...")
-                
-                # Enviar el audio
-                with open(file_path, 'rb') as audio_file:
-                    await query.message.reply_audio(
-                        audio=audio_file,
-                        title=user_info['title'][:64],  # Telegram limita a 64 chars
-                        caption=f"✅ **{user_info['title']}**\n\n"
-                               f"🎵 Audio extraído correctamente",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                
-                # Eliminar archivo temporal
-                os.remove(file_path)
-                
-                # Limpiar datos del usuario
-                if user_id in user_data:
-                    del user_data[user_id]
-                    
-            except Exception as e:
-                logger.error(f"Error al enviar audio: {e}")
-                await query.message.reply_text("❌ Error al enviar el audio. El archivo puede ser muy grande.")
-        else:
-            await status_msg.edit_text("❌ Error al extraer el audio. Intenta de nuevo.")
-    
-    def get_video_info(self, url: str) -> Dict:
-        """Obtiene información del video usando yt-dlp"""
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'socket_timeout': 30,
-            'extract_flat': False,
-        }
-        
-        try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 
-                # Extraer formatos de video (con video y audio)
-                video_formats = []
-                for fmt in info.get('formats', []):
-                    if (fmt.get('vcodec') and fmt.get('vcodec') != 'none' and 
-                        fmt.get('acodec') and fmt.get('acodec') != 'none'):
-                        
-                        # Calcular tamaño aproximado si no está disponible
-                        if not fmt.get('filesize') and fmt.get('tbr'):
-                            duration = info.get('duration', 0)
-                            if duration > 0:
-                                fmt['filesize_approx'] = (fmt['tbr'] * 1000 * duration) / 8
-                        
-                        resolution = fmt.get('resolution', 'audio only')
-                        if resolution == 'audio only':
-                            continue
-                            
-                        video_formats.append({
-                            'format_id': fmt['format_id'],
-                            'resolution': resolution,
-                            'ext': fmt.get('ext', 'mp4'),
-                            'filesize': fmt.get('filesize'),
-                            'filesize_approx': fmt.get('filesize_approx'),
-                            'vcodec': fmt.get('vcodec'),
-                            'acodec': fmt.get('acodec'),
-                            'tbr': fmt.get('tbr', 0)
-                        })
+                if not info:
+                    raise Exception("No se pudo extraer información del video")
                 
-                # Ordenar por resolución (mayor primero)
-                def get_resolution_num(res):
-                    if isinstance(res, str) and 'x' in res:
-                        try:
-                            return int(res.split('x')[1])
-                        except:
-                            return 0
-                    return 0
+                # Obtener información básica
+                title = info.get('title', 'Video sin título')
+                duration = info.get('duration', 0)
+                duration_str = f"{duration//60}:{duration%60:02d}" if duration else "Desconocida"
                 
-                video_formats.sort(key=lambda x: get_resolution_num(x['resolution']), reverse=True)
+                # Procesar formatos
+                formats = info.get('formats', [])
+                parsed_formats = []
                 
-                # Extraer formatos de audio solo
-                audio_formats = []
-                for fmt in info.get('formats', []):
-                    if (fmt.get('acodec') and fmt.get('acodec') != 'none' and 
-                        (not fmt.get('vcodec') or fmt.get('vcodec') == 'none')):
-                        
-                        audio_formats.append({
-                            'format_id': fmt['format_id'],
-                            'ext': fmt.get('ext', 'mp3'),
-                            'filesize': fmt.get('filesize'),
-                            'acodec': fmt.get('acodec'),
-                            'abr': fmt.get('abr', 0),
-                            'asr': fmt.get('asr', 0)
-                        })
+                for fmt in formats:
+                    parsed = parse_format_info(fmt)
+                    parsed_formats.append(parsed)
                 
-                # Ordenar audio por calidad (mejor primero)
-                audio_formats.sort(key=lambda x: x.get('abr', 0), reverse=True)
+                # Ordenar: primero video+audio, luego solo video, luego solo audio
+                video_audio = [f for f in parsed_formats if f['vcodec'] != 'none' and f['acodec'] != 'none']
+                video_only = [f for f in parsed_formats if f['vcodec'] != 'none' and f['acodec'] == 'none']
+                audio_only = [f for f in parsed_formats if f['vcodec'] == 'none' and f['acodec'] != 'none']
                 
-                # Formatear duración
-                duration_seconds = info.get('duration', 0)
-                if duration_seconds > 3600:
-                    duration = f"{duration_seconds // 3600}:{(duration_seconds % 3600) // 60:02d}:{duration_seconds % 60:02d}"
-                else:
-                    duration = f"{duration_seconds // 60}:{duration_seconds % 60:02d}"
+                sorted_formats = video_audio + video_only + audio_only
                 
                 return {
-                    'title': info.get('title', 'Sin título')[:100],  # Limitar longitud
+                    'success': True,
+                    'title': title,
                     'duration': duration,
-                    'uploader': info.get('uploader', 'Desconocido')[:50],
-                    'formats': video_formats[:8],  # Limitar a 8 formatos
-                    'audio_formats': audio_formats[:4]  # Limitar a 4 formatos de audio
+                    'duration_str': duration_str,
+                    'formats': sorted_formats,
+                    'url': url,
+                    'info': info
                 }
                 
+        except yt_dlp.utils.DownloadError as e:
+            if "HTTP Error 474" in str(e) or "geo" in str(e).lower():
+                logger.warning(f"Intento {attempt+1}: Error geo-bloqueo, reintentando...")
+                if attempt == max_retries - 1:
+                    return {
+                        'success': False,
+                        'error': f"Error de geo-bloqueo: {str(e)[:200]}"
+                    }
+                await asyncio.sleep(1)
+                continue
+            else:
+                logger.error(f"Error yt-dlp: {e}")
+                return {
+                    'success': False,
+                    'error': f"Error de descarga: {str(e)[:200]}"
+                }
         except Exception as e:
-            logger.error(f"Error al obtener info: {e}")
-            return None
+            logger.error(f"Error inesperado: {e}")
+            return {
+                'success': False,
+                'error': f"Error inesperado: {str(e)[:200]}"
+            }
     
-    def download_video(self, url: str, format_id: str, title: str):
-        """Descarga el video en el formato seleccionado"""
-        # Crear directorio temporal
-        temp_dir = tempfile.gettempdir()
-        safe_title = re.sub(r'[^\w\s-]', '', title).strip()[:50]
-        
-        ydl_opts = {
-            'format': format_id,
-            'outtmpl': os.path.join(temp_dir, f'{safe_title}.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'merge_output_format': 'mp4',
-            'socket_timeout': 30,
-            'retries': 3,
-        }
-        
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-                
-                # Asegurarse de que el archivo tiene extensión .mp4
-                if not filename.endswith('.mp4'):
-                    new_filename = os.path.splitext(filename)[0] + '.mp4'
-                    if os.path.exists(filename):
-                        os.rename(filename, new_filename)
-                    filename = new_filename
-                
-                # Verificar si el archivo existe y tiene tamaño
-                if os.path.exists(filename) and os.path.getsize(filename) > 0:
-                    return True, filename
-                else:
-                    return False, None
-                
-        except Exception as e:
-            logger.error(f"Error al descargar video: {e}")
-            return False, None
-    
-    def download_audio(self, url: str, format_id: str, title: str):
-        """Extrae y descarga el audio del video"""
-        temp_dir = tempfile.gettempdir()
-        safe_title = re.sub(r'[^\w\s-]', '', title).strip()[:50]
-        
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': os.path.join(temp_dir, f'{safe_title}.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'ffmpeg_location': '/data/data/com.termux/files/usr/bin/ffmpeg',
-            'socket_timeout': 30,
-            'retries': 3,
-        }
-        
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                
-                # Obtener el nombre del archivo de audio
-                filename = ydl.prepare_filename(info)
-                audio_filename = os.path.splitext(filename)[0] + '.mp3'
-                
-                # Verificar si el archivo existe y tiene tamaño
-                if os.path.exists(audio_filename) and os.path.getsize(audio_filename) > 0:
-                    return True, audio_filename
-                else:
-                    return False, None
-                
-        except Exception as e:
-            logger.error(f"Error al descargar audio: {e}")
-            return False, None
-    
-    def is_valid_url(self, text: str) -> bool:
-        """Verifica si el texto es una URL válida"""
-        # Patrón simple para URLs
-        url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
-        return re.match(url_pattern, text) is not None
-    
-    def run(self):
-        """Inicia el bot"""
-        print("🤖 Bot de descarga de videos iniciado...")
-        print("Presiona Ctrl+C para detenerlo")
-        
-        # CORRECCIÓN PRINCIPAL: Cambiar Update.ALL_UPDATES por None
-        self.app.run_polling(allowed_updates=None)
+    return {
+        'success': False,
+        'error': "Máximo de reintentos alcanzado"
+    }
 
+async def download_format(url, format_id, download_type="video", max_retries=2):
+    """Descargar un formato específico"""
+    temp_dir = tempfile.mkdtemp()
+    output_template = os.path.join(temp_dir, '%(title)s.%(ext)s')
+    
+    for attempt in range(max_retries):
+        try:
+            ydl_opts = {
+                'format': format_id,
+                'outtmpl': output_template,
+                'quiet': True,
+                'no_warnings': True,
+                'user_agent': USER_AGENTS[attempt % len(USER_AGENTS)],
+                'socket_timeout': 30,
+                'http_headers': {
+                    'Referer': 'https://www.google.com/',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                },
+                'retries': 10,
+                'fragment_retries': 10,
+                'skip_unavailable_fragments': True,
+            }
+            
+            # Opciones específicas para audio
+            if download_type == "audio":
+                ydl_opts.update({
+                    'format': 'bestaudio/best',
+                    'extractaudio': True,
+                    'audioformat': 'mp3',
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }],
+                })
+            
+            # Opciones para combinar video+audio
+            elif download_type == "combined":
+                ydl_opts.update({
+                    'format': f'{format_id}+bestaudio',
+                    'merge_output_format': 'mp4',
+                })
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # Primero obtener información para el nombre del archivo
+                info = ydl.extract_info(url, download=False)
+                result = ydl.download([url])
+            
+            # Buscar archivo descargado
+            files = os.listdir(temp_dir)
+            if not files:
+                raise Exception("No se encontraron archivos descargados")
+            
+            file_path = os.path.join(temp_dir, files[0])
+            
+            # Verificar tamaño real
+            file_size = os.path.getsize(file_path)
+            if file_size == 0:
+                # Usar ffprobe como fallback
+                real_size = get_ffprobe_size(file_path)
+                if real_size:
+                    file_size = real_size
+                else:
+                    raise Exception("Archivo descargado está vacío")
+            
+            return {
+                'success': True,
+                'file_path': file_path,
+                'file_size': file_size,
+                'title': info.get('title', 'descarga'),
+                'temp_dir': temp_dir
+            }
+            
+        except yt_dlp.utils.DownloadError as e:
+            if "HTTP Error 474" in str(e) and attempt < max_retries - 1:
+                logger.warning(f"Reintentando descarga ({attempt+1}/{max_retries})...")
+                await asyncio.sleep(2)
+                continue
+            else:
+                raise
+        except Exception as e:
+            raise
+    
+    raise Exception("Máximo de reintentos alcanzado en descarga")
+
+# --- HANDLERS DE TELEGRAM ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /start"""
+    await update.message.reply_text(
+        "🎬 *Bot Descargador Avanzado*\n\n"
+        "Envíame cualquier enlace de video y podrás:\n"
+        "✅ Ver *todos* los formatos disponibles\n"
+        "✅ Elegir por *ID de formato* exacto\n"
+        "✅ Ver *metadatos completos* (resolución, códecs, tamaño)\n"
+        "✅ Descargar *audio solo* o *video combinado*\n\n"
+        "📌 *Comandos:*\n"
+        "/start - Iniciar bot\n"
+        "/help - Ayuda detallada\n"
+        "/update - Actualizar yt-dlp\n"
+        "/cancel - Cancelar operación\n\n"
+        "🚀 *Envía un enlace para comenzar!*",
+        parse_mode='Markdown'
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /help"""
+    help_text = """
+📖 *Guía de Uso Completa*
+
+1. *Envíame un enlace* de cualquier plataforma:
+   • YouTube, TikTok, Instagram, Twitter/X
+   • Facebook, Reddit, Twitch, etc.
+
+2. *El bot analizará* y mostrará:
+   • Lista completa de formatos disponibles
+   • ID, resolución, tamaño y códecs de cada uno
+
+3. *Selecciona un formato* por su ID (ej: `137+140`)
+   • Video+Audio combinados
+   • Solo video o solo audio
+
+4. *Elige tipo de descarga:*
+   • 🎬 Video completo
+   • 🎵 Solo audio (MP3)
+   • 🔄 Combinar formatos separados
+
+5. *Obtendrás* el archivo con todos los metadatos
+
+⚠️ *Notas importantes:*
+• Límite: 50MB por archivo (Telegram)
+• Algunos sitios pueden tener restricciones
+• Archivos muy grandes pueden fallar
+
+🛠 *Solución de problemas:*
+Si ves error 474 (geo-bloqueo):
+• El bot reintentará automáticamente
+• Cambiará el user-agent
+• Probará formatos alternativos
+"""
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def update_ytdlp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Actualizar yt-dlp"""
+    await update.message.reply_text("🔄 *Actualizando yt-dlp...*", parse_mode='Markdown')
+    
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            await update.message.reply_text(
+                "✅ *yt-dlp actualizado exitosamente!*\n\n"
+                "Versión actualizada a la más reciente.",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ *Error actualizando yt-dlp:*\n\n```\n{result.stderr[:500]}\n```",
+                parse_mode='Markdown'
+            )
+            
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ *Error inesperado:*\n\n{str(e)}",
+            parse_mode='Markdown'
+        )
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancelar operación actual"""
+    user_id = update.effective_user.id
+    if user_id in user_data_cache:
+        del user_data_cache[user_id]
+    
+    await update.message.reply_text(
+        "❌ *Operación cancelada.*\n\nEnvía otro enlace cuando quieras.",
+        parse_mode='Markdown'
+    )
+
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manejar enlace de video"""
+    url = update.message.text.strip()
+    user_id = update.effective_user.id
+    
+    # Verificar URL válida
+    if not url.startswith(('http://', 'https://')):
+        await update.message.reply_text(
+            "❌ *URL inválida.*\n\nEnvía un enlace que comience con http:// o https://",
+            parse_mode='Markdown'
+        )
+        return
+    
+    await update.message.reply_text(
+        "🔍 *Analizando enlace...*\n\n"
+        "Obteniendo lista completa de formatos disponibles...",
+        parse_mode='Markdown'
+    )
+    
+    # Obtener formatos
+    result = await get_formats_list(url)
+    
+    if not result['success']:
+        await update.message.reply_text(
+            f"❌ *Error:*\n\n{result['error']}\n\n"
+            f"Intenta con otro enlace o verifica que sea público.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Guardar datos en cache
+    user_data_cache[user_id] = {
+        'url': url,
+        'info': result['info'],
+        'formats': result['formats'],
+        'title': result['title'],
+        'duration_str': result['duration_str']
+    }
+    
+    # Preparar mensaje con información general
+    title = result['title'][:100]
+    duration = result['duration_str']
+    total_formats = len(result['formats'])
+    
+    # Crear teclado con opciones principales
+    keyboard = []
+    
+    # Agrupar formatos por tipo para mostrar opciones principales
+    video_audio_count = len([f for f in result['formats'] if f['vcodec'] != 'none' and f['acodec'] != 'none'])
+    video_only_count = len([f for f in result['formats'] if f['vcodec'] != 'none' and f['acodec'] == 'none'])
+    audio_only_count = len([f for f in result['formats'] if f['vcodec'] == 'none' and f['acodec'] != 'none'])
+    
+    keyboard.append([
+        InlineKeyboardButton(f"🎬 Ver {total_formats} formatos", callback_data="show_all_formats")
+    ])
+    keyboard.append([
+        InlineKeyboardButton(f"📊 Video+Audio ({video_audio_count})", callback_data="filter_va"),
+        InlineKeyboardButton(f"🎥 Solo Video ({video_only_count})", callback_data="filter_v")
+    ])
+    keyboard.append([
+        InlineKeyboardButton(f"🎵 Solo Audio ({audio_only_count})", callback_data="filter_a"),
+        InlineKeyboardButton("🔄 Combinar", callback_data="combine_options")
+    ])
+    keyboard.append([
+        InlineKeyboardButton("❌ Cancelar", callback_data="cancel")
+    ])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Enviar mensaje con información
+    await update.message.reply_text(
+        f"✅ *Video encontrado:*\n\n"
+        f"📌 *Título:* {title}\n"
+        f"⏱️ *Duración:* {duration}\n"
+        f"📊 *Formatos totales:* {total_formats}\n\n"
+        f"*Selecciona una opción:*",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manejar botones de callback"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    data = query.data
+    
+    if user_id not in user_data_cache:
+        await query.edit_message_text(
+            "⚠️ *Sesión expirada.*\n\nEnvía el enlace de nuevo.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Cancelar
+    if data == "cancel":
+        del user_data_cache[user_id]
+        await query.edit_message_text(
+            "❌ *Operación cancelada.*\n\nEnvía otro enlace cuando quieras.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    info = user_data_cache[user_id]
+    formats = info['formats']
+    
+    # Mostrar todos los formatos
+    if data == "show_all_formats":
+        await show_formats_list(query, formats, "Todos los formatos")
+    
+    # Filtrar por tipo
+    elif data == "filter_va":
+        filtered = [f for f in formats if f['vcodec'] != 'none' and f['acodec'] != 'none']
+        await show_formats_list(query, filtered, "Formatos Video+Audio")
+    
+    elif data == "filter_v":
+        filtered = [f for f in formats if f['vcodec'] != 'none' and f['acodec'] == 'none']
+        await show_formats_list(query, filtered, "Formatos Solo Video")
+    
+    elif data == "filter_a":
+        filtered = [f for f in formats if f['vcodec'] == 'none' and f['acodec'] != 'none']
+        await show_formats_list(query, filtered, "Formatos Solo Audio")
+    
+    # Opciones para combinar
+    elif data == "combine_options":
+        await show_combine_options(query, formats)
+    
+    # Seleccionar formato para descarga normal
+    elif data.startswith("select_"):
+        format_id = data.replace("select_", "")
+        await select_format_for_download(query, user_id, format_id)
+    
+    # Seleccionar video para combinar
+    elif data.startswith("combine_video_"):
+        format_id = data.replace("combine_video_", "")
+        user_data_cache[user_id]['video_format'] = format_id
+        await show_audio_formats_for_combine(query, formats, format_id)
+    
+    # Seleccionar audio para combinar
+    elif data.startswith("combine_audio_"):
+        audio_format_id = data.replace("combine_audio_", "")
+        video_format_id = user_data_cache[user_id].get('video_format')
+        
+        if not video_format_id:
+            await query.edit_message_text("❌ Error: No se seleccionó video.")
+            return
+        
+        # Crear formato combinado (yt-dlp usa formato+formato para combinar)
+        combined_format = f"{video_format_id}+{audio_format_id}"
+        await select_format_for_download(query, user_id, combined_format, "combined")
+    
+    # Iniciar descarga
+    elif data.startswith("download_"):
+        parts = data.split("_")
+        if len(parts) >= 3:
+            format_id = parts[1]
+            download_type = parts[2] if len(parts) > 2 else "video"
+            await start_download(query, user_id, format_id, download_type)
+
+async def show_formats_list(query, formats, title):
+    """Mostrar lista de formatos"""
+    if not formats:
+        await query.edit_message_text(
+            f"❌ *No hay formatos disponibles* en la categoría: {title}",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Crear mensaje con lista de formatos
+    message = f"📊 *{title}:*\n\n"
+    
+    for i, fmt in enumerate(formats[:20], 1):  # Mostrar máximo 20
+        message += (
+            f"*{i}. ID:* `{fmt['format_id']}`\n"
+            f"   📏 *Resolución:* {fmt['resolution']}\n"
+            f"   💾 *Tamaño:* {fmt['size_str']}\n"
+            f"   🎬 *Video:* {fmt['vcodec']}\n"
+            f"   🎵 *Audio:* {fmt['acodec']}\n"
+            f"   📈 *Bitrate:* {fmt['tbr_str']}\n"
+            f"   📝 *Ext:* {fmt['ext']}\n"
+        )
+    
+    if len(formats) > 20:
+        message += f"\n*...y {len(formats) - 20} formatos más*\n"
+    
+    # Crear teclado con opciones de descarga
+    keyboard = []
+    for fmt in formats[:10]:  # Mostrar botones para primeros 10 formatos
+        btn_text = f"⬇️ {fmt['format_id']} ({fmt['size_str']})"
+        callback_data = f"select_{fmt['format_id']}"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
+    
+    # Agregar opción para ver más si hay muchos formatos
+    if len(formats) > 10:
+        keyboard.append([InlineKeyboardButton("📋 Ver más formatos...", callback_data="show_more_formats")])
+    
+    keyboard.append([InlineKeyboardButton("⬅️ Volver", callback_data="back_to_main")])
+    keyboard.append([InlineKeyboardButton("❌ Cancelar", callback_data="cancel")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def show_combine_options(query, formats):
+    """Mostrar opciones para combinar video y audio"""
+    # Filtrar formatos de video sin audio
+    video_formats = [f for f in formats if f['vcodec'] != 'none' and f['acodec'] == 'none']
+    
+    if not video_formats:
+        await query.edit_message_text(
+            "❌ *No hay formatos de video sin audio* para combinar.\n\n"
+            "Selecciona otro tipo de descarga.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    message = "🔄 *Combinar Video + Audio:*\n\n"
+    message += "Selecciona un formato de *video* (sin audio):\n\n"
+    
+    for i, fmt in enumerate(video_formats[:10], 1):
+        message += (
+            f"*{i}. ID:* `{fmt['format_id']}`\n"
+            f"   📏 *Resolución:* {fmt['resolution']}\n"
+            f"   💾 *Tamaño:* {fmt['size_str']}\n"
+            f"   🎬 *Codec:* {fmt['vcodec']}\n\n"
+        )
+    
+    # Crear teclado con opciones de video
+    keyboard = []
+    for fmt in video_formats[:8]:
+        btn_text = f"🎥 {fmt['format_id']} ({fmt['resolution']})"
+        callback_data = f"combine_video_{fmt['format_id']}"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
+    
+    keyboard.append([InlineKeyboardButton("⬅️ Volver", callback_data="back_to_main")])
+    keyboard.append([InlineKeyboardButton("❌ Cancelar", callback_data="cancel")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def show_audio_formats_for_combine(query, formats, video_format_id):
+    """Mostrar formatos de audio para combinar con video seleccionado"""
+    audio_formats = [f for f in formats if f['vcodec'] == 'none' and f['acodec'] != 'none']
+    
+    if not audio_formats:
+        await query.edit_message_text(
+            "❌ *No hay formatos de audio* disponibles para combinar.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Buscar información del video seleccionado
+    video_fmt = next((f for f in formats if f['format_id'] == video_format_id), None)
+    
+    message = f"🔄 *Combinar con Audio:*\n\n"
+    message += f"*Video seleccionado:*\n"
+    message += f"• ID: `{video_fmt['format_id']}`\n"
+    message += f"• Resolución: {video_fmt['resolution']}\n"
+    message += f"• Codec: {video_fmt['vcodec']}\n\n"
+    message += "*Selecciona formato de audio:*\n\n"
+    
+    for i, fmt in enumerate(audio_formats[:8], 1):
+        message += (
+            f"*{i}. ID:* `{fmt['format_id']}`\n"
+            f"   🎵 *Codec:* {fmt['acodec']}\n"
+            f"   💾 *Tamaño:* {fmt['size_str']}\n"
+            f"   📈 *Bitrate:* {fmt['tbr_str']}\n\n"
+        )
+    
+    # Crear teclado con opciones de audio
+    keyboard = []
+    for fmt in audio_formats[:8]:
+        btn_text = f"🎵 {fmt['format_id']} ({fmt['tbr_str']})"
+        callback_data = f"combine_audio_{fmt['format_id']}"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
+    
+    keyboard.append([InlineKeyboardButton("⬅️ Elegir otro video", callback_data="combine_options")])
+    keyboard.append([InlineKeyboardButton("❌ Cancelar", callback_data="cancel")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def select_format_for_download(query, user_id, format_id, download_type="video"):
+    """Mostrar opciones de descarga para un formato específico"""
+    if user_id not in user_data_cache:
+        await query.edit_message_text("⚠️ Sesión expirada.")
+        return
+    
+    formats = user_data_cache[user_id]['formats']
+    selected_fmt = next((f for f in formats if f['format_id'] == format_id), None)
+    
+    if not selected_fmt:
+        # Podría ser un formato combinado
+        if "+" in format_id:
+            parts = format_id.split("+")
+            video_fmt = next((f for f in formats if f['format_id'] == parts[0]), None)
+            audio_fmt = next((f for f in formats if f['format_id'] == parts[1]), None)
+            
+            if video_fmt and audio_fmt:
+                selected_fmt = {
+                    'format_id': format_id,
+                    'resolution': video_fmt['resolution'],
+                    'size_str': f"Aprox. {format_size((video_fmt.get('size_bytes') or 0) + (audio_fmt.get('size_bytes') or 0))}",
+                    'vcodec': video_fmt['vcodec'],
+                    'acodec': audio_fmt['acodec'],
+                    'tbr_str': f"{video_fmt.get('tbr', 0) + audio_fmt.get('tbr', 0):.1f}kbps",
+                    'ext': 'mp4',
+                    'media_type': '🎬 Video+Audio Combinado'
+                }
+    
+    if not selected_fmt:
+        await query.edit_message_text("❌ Formato no encontrado.")
+        return
+    
+    # Mostrar metadatos completos
+    message = (
+        f"📋 *Metadatos del Formato:*\n\n"
+        f"*ID:* `{selected_fmt['format_id']}`\n"
+        f"*Tipo:* {selected_fmt.get('media_type', 'Desconocido')}\n"
+        f"*Resolución:* {selected_fmt['resolution']}\n"
+        f"*Tamaño estimado:* {selected_fmt['size_str']}\n"
+        f"*Codec Video:* {selected_fmt['vcodec']}\n"
+        f"*Codec Audio:* {selected_fmt['acodec']}\n"
+        f"*Bitrate total:* {selected_fmt['tbr_str']}\n"
+        f"*Extensión:* {selected_fmt['ext']}\n\n"
+        f"*Selecciona tipo de descarga:*"
+    )
+    
+    # Crear teclado de opciones de descarga
+    keyboard = []
+    
+    if selected_fmt['vcodec'] != 'none':
+        keyboard.append([
+            InlineKeyboardButton("🎬 Descargar Video", callback_data=f"download_{format_id}_video")
+        ])
+    
+    if selected_fmt['acodec'] != 'none':
+        keyboard.append([
+            InlineKeyboardButton("🎵 Descargar Solo Audio (MP3)", callback_data=f"download_{format_id}_audio")
+        ])
+    
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Volver a formatos", callback_data="show_all_formats"),
+        InlineKeyboardButton("❌ Cancelar", callback_data="cancel")
+    ])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def start_download(query, user_id, format_id, download_type):
+    """Iniciar proceso de descarga"""
+    if user_id not in user_data_cache:
+        await query.edit_message_text("⚠️ Sesión expirada.")
+        return
+    
+    url = user_data_cache[user_id]['url']
+    title = user_data_cache[user_id]['title']
+    
+    # Actualizar mensaje
+    await query.edit_message_text(
+        f"⬇️ *Iniciando descarga...*\n\n"
+        f"📌 *Formato:* `{format_id}`\n"
+        f"🎯 *Tipo:* {'Audio' if download_type == 'audio' else 'Video'}\n"
+        f"📦 *Video:* {title[:50]}\n\n"
+        f"⏳ *Esto puede tardar unos minutos...*",
+        parse_mode='Markdown'
+    )
+    
+    try:
+        # Descargar el formato
+        result = await download_format(url, format_id, download_type)
+        
+        if result['success']:
+            file_path = result['file_path']
+            file_size = result['file_size']
+            
+            # Verificar límite de tamaño
+            if file_size > MAX_FILE_SIZE:
+                await query.edit_message_text(
+                    f"❌ *Archivo demasiado grande:*\n\n"
+                    f"📦 *Tamaño:* {format_size(file_size)}\n"
+                    f"📊 *Límite:* {format_size(MAX_FILE_SIZE)}\n\n"
+                    f"Selecciona un formato con menor calidad.",
+                    parse_mode='Markdown'
+                )
+                # Limpiar archivos temporales
+                try:
+                    os.remove(file_path)
+                    os.rmdir(os.path.dirname(file_path))
+                except:
+                    pass
+                return
+            
+            # Enviar archivo a Telegram
+            with open(file_path, 'rb') as file:
+                if download_type == 'audio':
+                    await query.message.reply_audio(
+                        audio=file,
+                        caption=(
+                            f"✅ *Audio descargado*\n\n"
+                            f"📌 *Título:* {title[:50]}\n"
+                            f"🔧 *Formato:* `{format_id}`\n"
+                            f"💾 *Tamaño:* {format_size(file_size)}\n"
+                            f"🎵 *Codec:* MP3"
+                        ),
+                        title=title[:30],
+                        parse_mode='Markdown'
+                    )
+                else:
+                    await query.message.reply_video(
+                        video=file,
+                        caption=(
+                            f"✅ *Video descargado*\n\n"
+                            f"📌 *Título:* {title[:50]}\n"
+                            f"🔧 *Formato:* `{format_id}`\n"
+                            f"💾 *Tamaño:* {format_size(file_size)}\n"
+                            f"🎬 *Tipo:* {'Video+Audio' if '+' in format_id else 'Video'}"
+                        ),
+                        supports_streaming=True,
+                        parse_mode='Markdown'
+                    )
+            
+            # Confirmar finalización
+            await query.edit_message_text(
+                f"✅ *¡Descarga completada!*\n\n"
+                f"📤 *Archivo enviado al chat.*\n\n"
+                f"¿Quieres descargar otro video? ¡Envía otro enlace!",
+                parse_mode='Markdown'
+            )
+            
+            # Limpiar archivos temporales
+            try:
+                os.remove(file_path)
+                os.rmdir(os.path.dirname(file_path))
+            except Exception as e:
+                logger.warning(f"Error limpiando archivos: {e}")
+            
+            # Limpiar cache del usuario
+            if user_id in user_data_cache:
+                del user_data_cache[user_id]
+        
+        else:
+            await query.edit_message_text(
+                f"❌ *Error en la descarga:*\n\n{result.get('error', 'Error desconocido')}",
+                parse_mode='Markdown'
+            )
+    
+    except Exception as e:
+        logger.error(f"Error en descarga: {e}")
+        await query.edit_message_text(
+            f"❌ *Error en la descarga:*\n\n```\n{str(e)[:300]}\n```\n\n"
+            f"Intenta con otro formato o verifica el enlace.",
+            parse_mode='Markdown'
+        )
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manejar errores globales"""
+    logger.error(f"Update {update} caused error {context.error}")
+    
+    try:
+        if update.effective_message:
+            await update.effective_message.reply_text(
+                "⚠️ *Error interno del bot.*\n\n"
+                "Por favor, intenta de nuevo en unos momentos.",
+                parse_mode='Markdown'
+            )
+    except:
+        pass
+
+# --- FUNCIÓN PRINCIPAL ---
+def main():
+    """Función principal para ejecutar el bot"""
+    # Crear aplicación de Telegram
+    application = Application.builder().token(TOKEN).build()
+    
+    # Añadir handlers de comandos
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("update", update_ytdlp))
+    application.add_handler(CommandHandler("cancel", cancel_command))
+    
+    # Handler para URLs (mensajes que contienen enlaces)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+    
+    # Handler para botones de callback
+    application.add_handler(CallbackQueryHandler(button_callback))
+    
+    # Handler de errores
+    application.add_error_handler(error_handler)
+    
+    # Verificar versión de yt-dlp
+    try:
+        yt_dlp_version = yt_dlp.version.__version__
+        logger.info(f"yt-dlp versión: {yt_dlp_version}")
+    except:
+        logger.warning("No se pudo obtener versión de yt-dlp")
+    
+    # Iniciar el bot
+    logger.info("🤖 Bot iniciado - Esperando enlaces...")
+    print("\n" + "="*50)
+    print("🎬 BOT DESCARGA AVANZADO ACTIVO")
+    print("="*50)
+    print(f"📅 Hora de inicio: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"📦 Carpeta descargas: {os.path.abspath(DOWNLOAD_FOLDER)}")
+    print(f"⚡ Máximo archivo: {format_size(MAX_FILE_SIZE)}")
+    print("="*50)
+    print("\n📥 Envía /start para comenzar...")
+    
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except KeyboardInterrupt:
+        logger.info("Bot detenido por el usuario")
+    except Exception as e:
+        logger.error(f"Error fatal: {e}")
 
 if __name__ == '__main__':
-    # Reemplaza 'TU_TOKEN_AQUI' con el token de tu bot
-    TOKEN = "8260660352:AAFPSK2-GXqGoBm2b3K988B_dadPXHduc5M"
+    # Verificar dependencias
+    import sys
+    try:
+        import yt_dlp
+    except ImportError:
+        print("❌ Error: yt-dlp no está instalado.")
+        print("📦 Instala con: pip install yt-dlp")
+        sys.exit(1)
     
-    # Verificar que ffmpeg esté instalado
-    if not os.path.exists('/data/data/com.termux/files/usr/bin/ffmpeg'):
-        print("⚠️ ADVERTENCIA: ffmpeg no está instalado.")
-        print("Instálalo con: pkg install ffmpeg")
-        print("El bot funcionará pero puede tener problemas con algunos formatos de audio.")
-    
-    bot = VideoDownloaderBot(TOKEN)
-    bot.run()
+    main()
