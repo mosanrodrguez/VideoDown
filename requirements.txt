@@ -1,4 +1,4 @@
 python-telegram-bot
-yt-dlp
-Flask
 requests
+ffmpeg-python
+python-dotenv
